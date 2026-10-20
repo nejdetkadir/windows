@@ -34,3 +34,59 @@ jobs:
             echo "UNEXPECTED: the test passed without the prepare default"; exit 1
           fi
           echo "As expected, the test fails without the prepare default"
+
+  # For geastack/core#75: link core main's prepare reference against the generator's
+  # weak definition, then the same units with GEA_PROGRAM_HOOK and this PR's default.
+  core-prepare-on-coff:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the core main lines this job mirrors
+        shell: bash
+        run: |
+          base=https://raw.githubusercontent.com/geastack/core/main/packages/core
+          curl -fsSL $base/gea_app_entry.cpp -o entry.cpp
+          curl -fsSL $base/scripts/generate-gea-embedded-assets.mjs -o generator.mjs
+          git ls-remote https://github.com/geastack/core main
+          sed -n 44p entry.cpp; sed -n 107p entry.cpp; sed -n 254p generator.mjs
+          grep -qxF 'extern "C" bool gea_embedded_assets_prepare() __attribute__((weak));' <(sed -n 44p entry.cpp)
+          grep -qxF '    if (gea_embedded_assets_prepare) gea_embedded_assets_prepare();' <(sed -n 107p entry.cpp)
+          grep -qF "extern \"C\" __attribute__((weak)) bool gea_embedded_assets_prepare() { return true; }" <(sed -n 254p generator.mjs)
+      - name: Link the four cases
+        shell: bash
+        run: |
+          mkdir case && cd case
+          cat > entry_main.cpp <<'SRC'
+          // core main: gea_app_entry.cpp:44 and :107
+          #include <cstdio>
+          extern "C" bool gea_embedded_assets_prepare() __attribute__((weak));
+          int main() { if (gea_embedded_assets_prepare) std::printf("prepare %d\n", gea_embedded_assets_prepare() ? 1 : 0); else std::printf("prepare null\n"); }
+          SRC
+          cat > entry_pr.cpp <<'SRC'
+          // core#75: GEA_PROGRAM_HOOK, which GEA_LINKED_HOOK_DEFAULTS=1 turns into an ordinary reference
+          #include <cstdio>
+          #if defined(GEA_LINKED_HOOK_DEFAULTS) && GEA_LINKED_HOOK_DEFAULTS
+          #define GEA_PROGRAM_HOOK
+          #else
+          #define GEA_PROGRAM_HOOK __attribute__((weak))
+          #endif
+          extern "C" bool gea_embedded_assets_prepare() GEA_PROGRAM_HOOK;
+          int main() { if (gea_embedded_assets_prepare) std::printf("prepare %d\n", gea_embedded_assets_prepare() ? 1 : 0); }
+          SRC
+          echo 'extern "C" __attribute__((weak)) bool gea_embedded_assets_prepare() { return true; }' > generated_weak.cpp
+          echo 'extern "C" bool gea_embedded_assets_prepare() { return false; }' > bundle_strong.cpp
+          cp ../packages/geastack-windows/targets/win32/main/win32_hook_defaults.cpp defaults.cpp
+          for f in entry_main entry_pr generated_weak bundle_strong defaults; do
+            clang-cl /nologo /c /O2 /MD /EHsc /std:c++20 /DGEA_LINKED_HOOK_DEFAULTS=1 /Fo$f.obj $f.cpp
+          done
+          fail=0
+          link() { name=$1; shift; lld-link /nologo /out:$name.exe /subsystem:console /map:$name.map "$@" > $name.log 2>&1; }
+          echo "== core main: plain weak reference + generator's weak definition (expect duplicate)"
+          if link main_nonbundle entry_main.obj generated_weak.obj defaults.obj; then echo "UNEXPECTED: linked"; fail=1; else cat main_nonbundle.log; fi
+          echo "== core#75 + windows#7: non-bundle app (expect link, generator's definition)"
+          if link pr_nonbundle entry_pr.obj generated_weak.obj defaults.obj; then grep -E ' gea_embedded_assets_prepare ' pr_nonbundle.map; ./pr_nonbundle.exe; grep -q 'generated_weak.obj' <(grep -E ' gea_embedded_assets_prepare ' pr_nonbundle.map) || fail=1; else cat pr_nonbundle.log; fail=1; fi
+          echo "== core#75 + windows#7: file-backed app (expect the strong definition: prepare 0)"
+          if link pr_bundle entry_pr.obj generated_weak.obj bundle_strong.obj defaults.obj; then out=$(./pr_bundle.exe); echo "$out"; [ "$out" = "prepare 0" ] || fail=1; else cat pr_bundle.log; fail=1; fi
+          echo "== core#75 + windows#7: no generated assets unit (expect the default: prepare 1)"
+          if link pr_no_unit entry_pr.obj defaults.obj; then out=$(./pr_no_unit.exe); echo "$out"; [ "$out" = "prepare 1" ] || fail=1; grep -E ' gea_embedded_assets_prepare | gea_win32_default_embedded_assets_prepare ' pr_no_unit.map; else cat pr_no_unit.log; fail=1; fi
+          exit $fail
