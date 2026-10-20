@@ -1,0 +1,36 @@
+# Runs hook-defaults.test.mjs on a real Windows runner for geastack/windows#7.
+# Lives only on this fork branch; not part of the PR.
+name: hook-defaults on Windows
+on:
+  push:
+    branches: [ci/hook-defaults-windows]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hook-defaults:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Toolchain
+        shell: cmd
+        run: |
+          ver
+          node --version
+          where clang-cl
+          clang-cl --version
+          where lld-link
+      - name: hook-defaults.test.mjs (this PR)
+        run: node --test packages/geastack-windows/targets/win32/test/hook-defaults.test.mjs
+      - name: Red check with geastack/windows main's win32_hook_defaults.cpp
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/geastack/windows/main/packages/geastack-windows/targets/win32/main/win32_hook_defaults.cpp \
+            -o packages/geastack-windows/targets/win32/main/win32_hook_defaults.cpp
+          if node --test packages/geastack-windows/targets/win32/test/hook-defaults.test.mjs; then
+            echo "UNEXPECTED: the test passed without the prepare default"; exit 1
+          fi
+          echo "As expected, the test fails without the prepare default"
