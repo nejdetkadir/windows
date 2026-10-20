@@ -54,6 +54,8 @@ jobs:
           grep -qF "extern \"C\" __attribute__((weak)) bool gea_embedded_assets_prepare() { return true; }" <(sed -n 254p generator.mjs)
       - name: Link the four cases
         shell: bash
+        env:
+          MSYS_NO_PATHCONV: '1'
         run: |
           mkdir case && cd case
           cat > entry_main.cpp <<'SRC'
